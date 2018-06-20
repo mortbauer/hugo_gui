@@ -2,14 +2,16 @@ import os
 import sys
 import appdirs
 import logging
+import subprocess
 
 import yaml
-import sh
 
-from PyQt5.QtWidgets import QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog
+from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog
 from PyQt5.QtCore import pyqtSignal
 
-from . import __component__
+from hugo_gui import __component__
+
 
 class MainWidget(QWidget):
 
@@ -29,6 +31,8 @@ class MainWidget(QWidget):
         self.config_dir = appdirs.user_config_dir(__component__)
         self.configpath = os.path.join(self.config_dir,'conf.yaml')
         self.config = self._get_config()
+
+    def start(self):
         if 'basepath' not in self.config or not os.path.isdir(self.basepath):
             self._show_init()
         self.start_devel_server()
@@ -59,41 +63,45 @@ class MainWidget(QWidget):
         return os.path.join(self.config['basepath'],'public')
 
     def publish(self):
-        sh.hugo(_cwd=self.basepath)
-        git_status = sh.git.status(_cwd=self.publicpath)
+        subprocess.call(['hugo'],cwd=self.basepath)
+        git_status = subprocess.check_output(['git','status'],cwd=self.publicpath)
         if 'nothing to commit' not in git_status:
             text,status = QInputDialog.getMultiLineText(self,'Publish Blog','Describe your changes','')
             if status:
-                sh.git.add('.',_cwd=self.publicpath)
-                sh.git.commit('.','-m',text,_cwd=self.publicpath)
+                subprocess.call(['git','add','.'],cwd=self.publicpath)
+                subprocess.call(['git','commit','.','-m',text],cwd=self.publicpath)
         if 'Your branch is up to date with' not in git_status:
-            sh.git.push('origin','master',_cwd=self.publicpath)
-        res = str(sh.git.config('--get','remote.origin.url',_cwd=self.publicpath))
+            subprocess.call(['git','push','origin','master'],cwd=self.publicpath)
+        res = str(subprocess.check_output(['git','config','--get','remote.origin.url'],cwd=self.publicpath))
         self.publishStatusChanged.emit(self.PUBLISH_STATUS.format(res[res.find('/')+1:].strip()))
 
-    def process_output(self,line):
-        if line.startswith('Web Server'):
-            line = line[line.find('//'):line.rfind('/')]
-            self.develStatusChanged.emit(self.DEVEL_STATUS.format(line))
+    def _watch_devel_server(self):
+        for line in iter(self._hugo_server.stdout.readline,''):
+            if line.startswith('Web Server'):
+                line = line[line.find('//'):line.rfind('/')]
+                self.develStatusChanged.emit(self.DEVEL_STATUS.format(line))
 
     def start_devel_server(self):
-        self._hugo_server = sh.hugo.server('-D',_cwd=self.basepath,_bg=True,_out=self.process_output)
+        self._hugo_server = subprocess.Popen(['hugo','server','-D'],cwd=self.basepath,stdout=subprocess.PIPE)
+        self._read_thread = threading.Thread(target=self._watch_devel_server)
+        self._read_thread.daemon = True
+        self._read_thread.start()
 
     def start_editor(self,relpath):
         path = os.path.join(self.basepath,relpath)
         if sys.platform.startswith('darwin'):
-            sh.open(path)
+            subprocess.Popen(['open',path])
         elif os.name == 'nt':
             os.startfile(path)
         elif os.name == 'posix':
-            sh.xdg_open(path)
+            subprocess.Popen(['xdg_open',path])
 
     def make_new_post(self):
         text,status = QInputDialog.getText(self,'New Blog Post','Post Title', QLineEdit.Normal,'')
         if status:
             rel_name = 'post/{0}.md'.format(text)
             try:
-                sh.hugo.new(rel_name,_cwd=self.basepath)
+                subprocess.call(['hugo','new',rel_name],cwd=self.basepath)
             except:
                 self.start_editor(os.path.join('content',rel_name))
 
@@ -124,32 +132,40 @@ class MainWidget(QWidget):
         msg.setStandardButtons(QMessageBox.Ok)
         res = msg.exec()
         if res == QMessageBox.Ok:
+            print('!!!!!!!')
             self._select_path_init()
 
     def _select_path_init(self):
         self.config['basepath'] = basepath = str(QFileDialog.getExistingDirectory(self, "Hugo"))
         self.siteconfig = os.path.join(basepath,'config.toml')
         if not os.path.isfile(self.siteconfig):
-            sh.hugo.new.site('.',_cwd=basepath)
+            subprocess.call(['hugo','new','site','.'],cwd=basepath)
         if not os.path.isdir(os.path.join(basepath,'.git')):
-            sh.git.init('.',_cwd=basepath)
-            sh.git.submodule.add('https://github.com/azmelanar/hugo-theme-pixyll.git','themes/pixyll',_cwd=basepath)
+            subprocess.call(['git','init','.'],cwd=basepath)
+            subprocess.call(['git','submodule','add','https://github.com/azmelanar/hugo-theme-pixyll.git','themes/pixyll'],cwd=basepath)
             with open(self.siteconfig,'a') as conf:
                 conf.write('theme = "pixyll"\n')
         self._persist_config()
 
     def closeEvent(self,event):
+        print('got close')
         if self._hugo_server is not None:
             self._hugo_server.kill()
         event.accept()
-        
+
 
 def main():
+    dirpath = os.path.dirname(__file__)
     app = QApplication(sys.argv)
-    w = MainWidget()
-    w.show()
+    win = QMainWindow()
+    print(os.path.join(dirpath,'hugo.png'))
+    win.setWindowIcon(QIcon(os.path.join(dirpath,'hugo_1.png')))
+    w = MainWidget(win)
+    win.setCentralWidget(w)
+    w.start()
+    win.show()
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
     main()
-    
+
