@@ -33,8 +33,7 @@ install:
   - "python --version"
 
 build_script:
-  - cmd: >-
-    pyinstaller hugo-gui.spec
+  - pyinstaller hugo-gui.spec
 
 artifacts:
   # bdist_wheel puts your built wheel in the dist directory
