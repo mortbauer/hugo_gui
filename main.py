@@ -1,17 +1,18 @@
 import os
 import sys
-import appdirs
 import logging
+import threading
 import subprocess
 from functools import partial
 
+import appdirs
 import yaml
 
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog
 from PyQt5.QtCore import pyqtSignal, QObject
 
-from hugo_gui import __component__
+__component__ = 'hugo-gui'
 
 
 class Application(QObject):
@@ -75,7 +76,8 @@ class Application(QObject):
         return True
 
     def _watch_devel_server(self):
-        for line in iter(self._hugo_server.stdout.readline,''):
+        for raw in iter(self._hugo_server.stdout.readline,''):
+            line = raw.decode('utf-8')
             if line.startswith('Web Server'):
                 line = line[line.find('//'):line.rfind('/')]
                 self.develStatusChanged.emit(line)
@@ -88,7 +90,7 @@ class Application(QObject):
 
     def publish(self):
         subprocess.call(['hugo'],cwd=self.basepath)
-        git_status = subprocess.check_output(['git','status'],cwd=self.publicpath)
+        git_status = subprocess.check_output(['git','status'],cwd=self.publicpath).decode('utf-8')
         if 'nothing to commit' not in git_status:
             text,status = QInputDialog.getMultiLineText(self,'Publish Blog','Describe your changes','')
             if status:
@@ -96,15 +98,16 @@ class Application(QObject):
                 subprocess.call(['git','commit','.','-m',text],cwd=self.publicpath)
         if 'Your branch is up to date with' not in git_status:
             subprocess.call(['git','push','origin','master'],cwd=self.publicpath)
-        res = str(subprocess.check_output(['git','config','--get','remote.origin.url'],cwd=self.publicpath))
+        res = subprocess.check_output(['git','config','--get','remote.origin.url'],cwd=self.publicpath).decode('utf-8')
         self.publishStatusChanged.emit(res[res.find('/')+1:].strip())
 
-    def make_new_post(self,text):
-        rel_name = 'post/{0}.md'.format(text)
-        try:
-            subprocess.call(['hugo','new',rel_name],cwd=self.basepath)
-        except:
-            self.start_editor(os.path.join('content',rel_name))
+    def edit_post(self,text):
+        name = '{0}.md'.format(text)
+        path = os.path.join(self.basepath,'content','post',name)
+        if not os.path.isfile(path):
+            subprocess.call(['hugo','new',os.path.join('post',name)],cwd=self.basepath)
+        else:
+            self.start_editor(path)
 
     def start_editor(self,relpath):
         path = os.path.join(self.basepath,relpath)
@@ -113,7 +116,7 @@ class Application(QObject):
         elif os.name == 'nt':
             os.startfile(path)
         elif os.name == 'posix':
-            subprocess.Popen(['xdg_open',path])
+            subprocess.Popen(['xdg-open',path])
 
 class MainWidget(QWidget):
     DEVEL_STATUS = 'The development blog is at: <a href="http:{0}"><font color=black>{0}</font></a>'
@@ -139,7 +142,7 @@ class MainWidget(QWidget):
         self.layout.addWidget(self._button)
 
     def show_normal_frame(self):
-        # self.app.start_devel_server()
+        self.app.start_devel_server()
         self.basepath_label = QLabel('Basepath is: %s'%self.app.basepath)
         self.layout.addWidget(self.basepath_label)
         button = QPushButton('New Post')
@@ -164,7 +167,7 @@ class MainWidget(QWidget):
     def make_new_post(self):
         text,status = QInputDialog.getText(self,'New Blog Post','Post Title', QLineEdit.Normal,'')
         if status:
-            self.app.make_new_post(text)
+            self.app.edit_post(text)
 
     def _select_path_init(self):
         res = str(QFileDialog.getExistingDirectory(self, "Hugo")).strip()
@@ -184,7 +187,7 @@ def main():
     if qt_app is None:
         qt_app = QApplication([])
     win = QMainWindow()
-    # win.setWindowIcon(QIcon(os.path.join(dirpath,'hugo_1.png')))
+    win.setWindowIcon(QIcon('icon.png'))
     app = Application()
     # app.config.pop('basepath',None)
     w = MainWidget(app,win)
