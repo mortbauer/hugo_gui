@@ -9,6 +9,6 @@ setup(
     description = 'A pyqt frontend for hugo static blog generator',
     install_requires=['appdirs','sh','pyyaml','PyQt5'],
     entry_points={
-        'console_scripts': ['hugo-gui=hugo_gui.main:main'],
+        'console_scripts': ['hugo-gui=main:main'],
     },
 )

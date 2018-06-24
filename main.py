@@ -119,6 +119,7 @@ class Application(QObject):
             subprocess.Popen(['xdg-open',path])
 
 class MainWidget(QWidget):
+    BASEPATH = 'The local basepath of the blog is at: <a href="file://{0}"><font color=black>{0}</font></a>'
     DEVEL_STATUS = 'The development blog is at: <a href="http:{0}"><font color=black>{0}</font></a>'
     PUBLISH_STATUS = 'The public blog is reachable at: <a href="https:{0}"><font color=black>{0}</font></a>'
 
@@ -143,8 +144,9 @@ class MainWidget(QWidget):
 
     def show_normal_frame(self):
         self.app.start_devel_server()
-        self.basepath_label = QLabel('Basepath is: %s'%self.app.basepath)
-        self.layout.addWidget(self.basepath_label)
+        basepath_label = QLabel(self.BASEPATH.format(self.app.basepath))
+        basepath_label.setOpenExternalLinks(True)
+        self.layout.addWidget(basepath_label)
         button = QPushButton('New Post')
         button.clicked.connect(self.make_new_post)
         self.layout.addWidget(button)
@@ -186,8 +188,11 @@ def main():
     qt_app = QApplication.instance()
     if qt_app is None:
         qt_app = QApplication([])
+    qt_app.setApplicationName(__component__)
+    qt_app.setApplicationDisplayName(__component__)
     win = QMainWindow()
     win.setWindowIcon(QIcon('icon.png'))
+    win.setWindowTitle(__component__)
     app = Application()
     # app.config.pop('basepath',None)
     w = MainWidget(app,win)
