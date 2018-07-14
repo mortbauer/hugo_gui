@@ -1,0 +1,4 @@
+appdirs
+pyyaml
+PyQt
+inotify

@@ -1,23 +1,27 @@
 import os
 import sys
+import time
 import logging
 import threading
 import subprocess
+import inotify.adapters
 from functools import partial
 
 import appdirs
 import yaml
 
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog
-from PyQt5.QtCore import pyqtSignal, QObject
+from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog, QPlainTextEdit
+from PyQt5.QtCore import pyqtSignal, QObject, QSocketNotifier
 
 __component__ = 'hugo-gui'
 
+logger = logging.getLogger(__name__)
 
 class Application(QObject):
     develStatusChanged = pyqtSignal(str)
     publishStatusChanged = pyqtSignal(str)
+    newLogLine = pyqtSignal(str)
 
     def __init__(self):
         super(Application,self).__init__()
@@ -76,26 +80,49 @@ class Application(QObject):
         return True
 
     def _watch_devel_server(self):
-        for raw in iter(self._hugo_server.stdout.readline,''):
-            line = raw.decode('utf-8')
-            if line.startswith('Web Server'):
-                line = line[line.find('//'):line.rfind('/')]
-                self.develStatusChanged.emit(line)
+        inode = inotify.adapters.InotifyTree(os.path.join(self.basepath,'content'))
+        while True:
+            raw = self._hugo_server.stdout.readline()
+            if raw:
+                line = raw.decode('utf-8')
+                if line.startswith('Web Server'):
+                    line = line[line.find('//'):line.rfind('/')]
+                    self.develStatusChanged.emit(line)
+                self.newLogLine.emit(line)
+            if self._hugo_server.poll() is not None:
+                logger.warning('Devel server died')
+                while True:
+                    event = next(inode.event_gen())
+                    if event is not None:
+                        break
+                    time.sleep(0.2)
+                self._hugo_server = subprocess.Popen(['hugo','server','-D'],cwd=self.basepath,stdout=subprocess.PIPE)
+                logger.warning('Restarting devel server')
+            time.sleep(0.1)
+
+    def _read_devel_server_stdout(self):
+        data = self._hugo_server.stdout.read()
 
     def start_devel_server(self):
         self._hugo_server = subprocess.Popen(['hugo','server','-D'],cwd=self.basepath,stdout=subprocess.PIPE)
+        # self._notifier = QSocketNotifier(self._hugo_server.stdout.fileno(),QSocketNotifier.Read)
+        # self._notifier.activated.connect(self._read_devel_server_stdout)
         self._read_thread = threading.Thread(target=self._watch_devel_server)
         self._read_thread.daemon = True
         self._read_thread.start()
 
-    def publish(self):
+    def prepare_publish(self):
         subprocess.call(['hugo'],cwd=self.basepath)
         git_status = subprocess.check_output(['git','status'],cwd=self.publicpath).decode('utf-8')
         if 'nothing to commit' not in git_status:
-            text,status = QInputDialog.getMultiLineText(self,'Publish Blog','Describe your changes','')
-            if status:
-                subprocess.call(['git','add','.'],cwd=self.publicpath)
-                subprocess.call(['git','commit','.','-m',text],cwd=self.publicpath)
+            return True
+
+    def commit_changes(self,commit_msg):
+        subprocess.call(['git','add','.'],cwd=self.publicpath)
+        subprocess.call(['git','commit','.','-m',commit_msg],cwd=self.publicpath)
+
+    def publish(self):
+        git_status = subprocess.check_output(['git','status'],cwd=self.publicpath).decode('utf-8')
         if 'Your branch is up to date with' not in git_status:
             subprocess.call(['git','push','origin','master'],cwd=self.publicpath)
         res = subprocess.check_output(['git','config','--get','remote.origin.url'],cwd=self.publicpath).decode('utf-8')
@@ -106,8 +133,7 @@ class Application(QObject):
         path = os.path.join(self.basepath,'content','post',name)
         if not os.path.isfile(path):
             subprocess.call(['hugo','new',os.path.join('post',name)],cwd=self.basepath)
-        else:
-            self.start_editor(path)
+        self.start_editor(path)
 
     def start_editor(self,relpath):
         path = os.path.join(self.basepath,relpath)
@@ -151,9 +177,8 @@ class MainWidget(QWidget):
         button.clicked.connect(self.make_new_post)
         self.layout.addWidget(button)
         button = QPushButton('Publish')
-        button.clicked.connect(self.app.publish)
+        button.clicked.connect(self.publish)
         self.layout.addWidget(button)
-        button = QPushButton('Publish')
         devel_status = QLabel(self)
         devel_status.setOpenExternalLinks(True)
         self.layout.addWidget(devel_status)
@@ -162,9 +187,27 @@ class MainWidget(QWidget):
         publish_status.setOpenExternalLinks(True)
         self.layout.addWidget(publish_status)
         self.app.publishStatusChanged.connect(partial(self.set_status,publish_status,self.PUBLISH_STATUS))
+        log_output = QPlainTextEdit(self)
+        log_output.setReadOnly(True)
+        self.layout.addWidget(log_output)
+        self.app.newLogLine.connect(partial(self.append_log,log_output))
+
+    def publish(self):
+        if self.app.prepare_publish():
+            text,status = QInputDialog.getMultiLineText(self,'Publish Blog','Describe your changes','')
+            if status:
+                self.app.commit_changes(text)
+        self.app.publish()
 
     def set_status(self,label,templ,text):
         label.setText(templ.format(text))
+
+    def append_log(self,textedit,line):
+        if 'ERROR' in line:
+            textedit.appendPlainText(line[line.find('ERROR'):])
+            textedit.verticalScrollBar().setValue(textedit.verticalScrollBar().maximum())
+        elif 'Total in' in line:
+            textedit.clear()
 
     def make_new_post(self):
         text,status = QInputDialog.getText(self,'New Blog Post','Post Title', QLineEdit.Normal,'')
