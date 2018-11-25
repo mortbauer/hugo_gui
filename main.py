@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import glob
 import logging
 import threading
 import subprocess
@@ -11,12 +12,32 @@ import appdirs
 import yaml
 
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog, QPlainTextEdit
-from PyQt5.QtCore import pyqtSignal, QObject, QSocketNotifier
+from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QFileDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QInputDialog, QPlainTextEdit, QListView, QDialog, QCompleter
+from PyQt5.QtCore import pyqtSignal, QObject, QSocketNotifier, QAbstractListModel, Qt, QVariant, QSortFilterProxyModel, QRegExp 
 
 __component__ = 'hugo-gui'
 
 logger = logging.getLogger(__name__)
+
+
+class PostsListModel(QAbstractListModel):
+    def __init__(self, app,parent=None):
+        super(PostsListModel,self).__init__(parent)
+        self.app = app
+        self.posts = []
+        path = os.path.join(self.app.basepath, 'content','**','*.md')
+        for path in glob.glob(path,recursive=True):
+            self.posts.append((os.path.basename(path),path))
+
+    def rowCount(self, index):
+        return len(self.posts)
+
+    def data(self, index, role):
+        if index.isValid() and role == Qt.DisplayRole and index.column() == 0:
+            text = self.posts[index.row()][0]
+            return QVariant(text)
+        return QVariant()
+
 
 class Application(QObject):
     develStatusChanged = pyqtSignal(str)
@@ -128,8 +149,9 @@ class Application(QObject):
         res = subprocess.check_output(['git','config','--get','remote.origin.url'],cwd=self.publicpath).decode('utf-8')
         self.publishStatusChanged.emit(res[res.find('/')+1:].strip())
 
-    def edit_post(self,text):
-        name = '{0}.md'.format(text)
+    def edit_post(self,name):
+        if not name.endswith('md'):
+            name = '{0}.md'.format(name)
         path = os.path.join(self.basepath,'content','post',name)
         if not os.path.isfile(path):
             subprocess.call(['hugo','new',os.path.join('post',name)],cwd=self.basepath)
@@ -144,6 +166,59 @@ class Application(QObject):
         elif os.name == 'posix':
             subprocess.Popen(['xdg-open',path])
 
+    def stop(self):
+        if self._hugo_server is not None:
+            self._hugo_server.kill()
+
+
+class PostSelectionWidget(QDialog):
+    def __init__(self,app,parent=None):
+        super(PostSelectionWidget,self).__init__(parent=parent)
+        self.app = app
+        self.model = PostsListModel(app)
+        self.filtermodel = QSortFilterProxyModel()
+        self.filtermodel.setSourceModel(self.model)
+        self.resize(450, 250)
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+        view = QListView(self)
+        self.completer = QCompleter(parent=self)
+        self.completer.setCompletionMode(QCompleter.InlineCompletion)
+        self.completer.setCompletionColumn(0)
+        self.completer.setCompletionRole(Qt.DisplayRole)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setModelSorting(QCompleter.CaseInsensitivelySortedModel)
+        self.completer.setModel(self.model)
+        self._edit = QLineEdit('')
+        self._edit.setCompleter(self.completer)
+        self._edit.textEdited.connect(self.setfilter)
+        self.layout.addWidget(self._edit)
+        self.layout.addWidget(view)
+        view.setModel(self.filtermodel)
+        view.clicked.connect(self.select)
+        view.doubleClicked.connect(self.select_and_edit)
+        self._button = QPushButton('Edit')
+        self._button.clicked.connect(self.edit)
+        self.layout.addWidget(self._button)
+
+    def setfilter(self,text):
+        regexp = QRegExp("%s*"%text, Qt.CaseInsensitive, QRegExp.Wildcard);
+        self.filtermodel.setFilterRegExp(regexp);
+
+    def select(self,index):
+        text = self.filtermodel.data(index)
+        self._edit.setText(text)
+
+    def select_and_edit(self,index):
+        text = self.filtermodel.data(index)
+        self._edit.setText(text)
+        self.app.edit_post(text)
+
+    def edit(self):
+        self.app.edit_post(self._edit.text())
+
+
+
 class MainWidget(QWidget):
     BASEPATH = 'The local basepath of the blog is at: <a href="file://{0}"><font color=black>{0}</font></a>'
     DEVEL_STATUS = 'The development blog is at: <a href="http:{0}"><font color=black>{0}</font></a>'
@@ -152,7 +227,6 @@ class MainWidget(QWidget):
     def __init__(self,app,parent=None):
         super(MainWidget,self).__init__(parent=parent)
         self.app = app
-        self._hugo_server = None
         self.resize(250, 150)
         self.move(300, 300)
         self.setWindowTitle('Hugo')
@@ -173,8 +247,8 @@ class MainWidget(QWidget):
         basepath_label = QLabel(self.BASEPATH.format(self.app.basepath))
         basepath_label.setOpenExternalLinks(True)
         self.layout.addWidget(basepath_label)
-        button = QPushButton('New Post')
-        button.clicked.connect(self.make_new_post)
+        button = QPushButton('Edit Post')
+        button.clicked.connect(self.edit_post)
         self.layout.addWidget(button)
         button = QPushButton('Publish')
         button.clicked.connect(self.publish)
@@ -209,10 +283,12 @@ class MainWidget(QWidget):
         elif 'Total in' in line:
             textedit.clear()
 
-    def make_new_post(self):
-        text,status = QInputDialog.getText(self,'New Blog Post','Post Title', QLineEdit.Normal,'')
-        if status:
-            self.app.edit_post(text)
+    def edit_post(self):
+        widget = PostSelectionWidget(self.app,self)
+        widget.show()
+        # text,status = QInputDialog.getText(self,'Edit Blog Post','Post Title', QLineEdit.Normal,'')
+        # if status:
+            # self.app.edit_post(text)
 
     def _select_path_init(self):
         res = str(QFileDialog.getExistingDirectory(self, "Hugo")).strip()
@@ -222,8 +298,7 @@ class MainWidget(QWidget):
                 self.show_normal_frame()
 
     def on_close(self):
-        if self._hugo_server is not None:
-            self._hugo_server.kill()
+        self.app.stop()
 
 
 def main():
